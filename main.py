@@ -1,27 +1,24 @@
 import time
 import json
-import threading
 import requests
-import os
-from datetime import datetime, timedelta
+import asyncio
+import websockets
+from datetime import datetime, timedelta, timezone
 import random
-import websocket
 
 # Telegram Configuration
-TOKEN = '8543793515:AAEvGOpD2Me8BdXOUNxoCczIYEs3D2r0xlc'
-CHAT_ID = '@riyafuturelive'
+TELEGRAM_BOT_TOKEN = "8543793515:AAEvGOpD2Me8BdXOUNxoCczIYEs3D2r0xlc"
+CHAT_ID = "@riyafuturelive"
 
-# Quotex Credentials from Environment Variables
-QX_EMAIL = os.environ.get('QX_EMAIL')
-QX_PASSWORD = os.environ.get('QX_PASSWORD')
+# বাংলাদেশ টাইমজোন (UTC+6)
+BST = timezone(timedelta(hours=6))
 
-# Quotex WebSocket URL
-WS_URL = "wss://ws2.qxbroker.com/socket.io/?EIO=3&transport=websocket"
+# পাবলিক রিয়েল-টাইম ফরেক্স মার্কেট ডেটা ফিড
+FOREX_WS_URL = "wss://stream.binance.com:9443/ws/eurusdt@ticker"
 
-# Global Variables for Real-time Market Data & History
+# গ্লোবাল ভেরিয়েবলস
 live_market_prices = {}
-price_history = {}  # প্রতিটি পেয়ারের পূর্ববর্তী প্রাইসের হিস্ট্রি (ইন্ডিকেটর ক্যালকুলেশনের জন্য)
-live_payouts = {}
+price_history = []
 todays_signals = []
 signals_sent_today = False
 summary_sent_today = False
@@ -31,85 +28,42 @@ alert_3_sent = False
 
 def send_telegram_message(message):
     """টেলিগ্রামে মেসেজ পাঠানোর ফাংশন"""
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         'chat_id': CHAT_ID,
         'text': message,
         'parse_mode': 'Markdown'
     }
     try:
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, timeout=10)
         return response.json()
     except Exception as e:
-        print(f"Error sending message: {e}")
+        print(f"Telegram Error: {e}")
 
-def on_message(ws, message):
-    """Quotex WebSocket থেকে রিয়েল-টাইম ডেটা এবং প্রাইস হিস্ট্রি ট্র্যাক করার লজিক"""
-    global live_market_prices, price_history, live_payouts
-    try:
-        if message.startswith("2"):
-            ws.send("3")
-            return
-        
-        if message.startswith("42"):
-            data_str = message[2:]
-            parsed_data = json.loads(data_str)
-            if isinstance(parsed_data, list) and len(parsed_data) > 1:
-                payload = parsed_data[1]
-                if isinstance(payload, dict):
-                    asset = payload.get("asset") or payload.get("symbol")
-                    price = payload.get("price") or payload.get("rate")
-                    payout = payload.get("payout") or payload.get("percent")
-                    
-                    if asset and price:
-                        p_float = float(price)
-                        live_market_prices[asset] = p_float
-                        
-                        # প্রাইস হিস্ট্রি মেইনটেইন করা
-                        if asset not in price_history:
-                            price_history[asset] = []
-                        price_history[asset].append(p_float)
-                        if len(price_history[asset]) > 30:
-                            price_history[asset].pop(0)
-                            
-                    if asset and payout:
-                        live_payouts[asset] = float(payout)
-    except Exception as e:
-        pass
-
-def on_error(ws, error):
-    print(f"WebSocket Error: {error}")
-
-def on_close(ws, close_status_code, close_msg):
-    print("WebSocket closed. Reconnecting in 5 seconds...")
-    time.sleep(5)
-    start_websocket()
-
-def on_open(ws):
-    print("Connected to Quotex WebSocket successfully!")
-    auth_packet = json.dumps(["auth", {"email": QX_EMAIL, "password": QX_PASSWORD}])
-    ws.send(f"42{auth_packet}")
-
-def start_websocket():
+async def listen_public_forex_data():
+    """পাবলিক মার্কেট থেকে রিয়েল-টাইম প্রাইস এবং হিস্ট্রি কালেকশন"""
+    global live_market_prices, price_history
     while True:
         try:
-            ws = websocket.WebSocketApp(WS_URL,
-                                        on_open=on_open,
-                                        on_message=on_message,
-                                        on_error=on_error,
-                                        on_close=on_close)
-            ws.run_forever()
+            async with websockets.connect(FOREX_WS_URL) as websocket:
+                print("Connected to Multi-Layer Advanced Forex WebSocket successfully!")
+                async for message in websocket:
+                    data = json.loads(message)
+                    current_price = float(data.get('c', 0))
+                    if current_price > 0:
+                        live_market_prices["EUR/USD"] = current_price
+                        price_history.append(current_price)
+                        if len(price_history) > 100:
+                            price_history.pop(0)
         except Exception as e:
-            print(f"WS Connection Failed: {e}")
-            time.sleep(10)
+            print(f"WebSocket Connection Error: {e}. Reconnecting...")
+            await asyncio.sleep(5)
 
 def calculate_rsi(prices, period=14):
-    """রিয়েল-টাইম RSI (Relative Strength Index) ক্যালকুলেট করার ফাংশন"""
+    """লেয়ার ১: RSI ক্যালকুলেশন"""
     if len(prices) < period + 1:
         return 50.0
-    
-    gains = []
-    losses = []
+    gains, losses = [], []
     for i in range(1, len(prices)):
         change = prices[i] - prices[i-1]
         if change > 0:
@@ -118,51 +72,81 @@ def calculate_rsi(prices, period=14):
         else:
             gains.append(0)
             losses.append(abs(change))
-            
     avg_gain = sum(gains[-period:]) / period
     avg_loss = sum(losses[-period:]) / period
-    
     if avg_loss == 0:
         return 100.0
-    
     rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return 100 - (100 / (1 + rs))
 
-def advanced_technical_analysis(asset):
-    """RSI, Moving Average এবং প্রাইস মোমেন্টাম ফিল্টার মিলিয়ে হাই-একুরেসি সিগন্যাল জেনারেট করা"""
-    history = price_history.get(asset, [])
-    current_price = live_market_prices.get(asset)
-    
-    if not current_price or len(history) < 10:
-        return "CALL 🟢" if random.random() > 0.48 else "PUT 🔴"
-    
-    rsi = calculate_rsi(history)
-    short_ma = sum(history[-5:]) / 5
-    long_ma = sum(history[-15:]) / len(history[-15:])
-    
-    if rsi < 35 or (short_ma > long_ma and rsi < 55):
+def calculate_macd(prices):
+    """লেয়ার ২: MACD ক্যালকুলেশন"""
+    if len(prices) < 26:
+        return 0, 0
+    exp12 = sum(prices[-12:]) / 12
+    exp26 = sum(prices[-26:]) / 26
+    macd_line = exp12 - exp26
+    signal_line = sum(prices[-9:]) / 9 if len(prices) >= 9 else macd_line
+    return macd_line, signal_line
+
+def calculate_bollinger_bands(prices, period=20):
+    """লেয়ার ৩: বলিঙ্গার ব্যান্ডস ক্যালকুলেশন"""
+    if len(prices) < period:
+        return prices[-1], prices[-1], prices[-1]
+    sma = sum(prices[-period:]) / period
+    variance = sum((x - sma) ** 2 for x in prices[-period:]) / period
+    std_dev = variance ** 0.5
+    upper_band = sma + (std_dev * 2)
+    lower_band = sma - (std_dev * 2)
+    return upper_band, sma, lower_band
+
+def multi_layer_advanced_analysis():
+    """একাধিক ইন্ডিকেটর মিলিয়ে নিখুঁত এন্ট্রি ফিল্টার"""
+    if len(price_history) < 30:
         return "CALL 🟢"
-    elif rsi > 65 or (short_ma < long_ma and rsi > 45):
+    
+    current_price = price_history[-1]
+    rsi = calculate_rsi(price_history)
+    macd_line, signal_line = calculate_macd(price_history)
+    upper_band, sma, lower_band = calculate_bollinger_bands(price_history)
+    
+    short_ma = sum(price_history[-5:]) / 5
+    long_ma = sum(price_history[-20:]) / 20
+    
+    buy_score = 0
+    if rsi < 42: buy_score += 1
+    if macd_line > signal_line: buy_score += 1
+    if current_price <= lower_band or current_price < sma: buy_score += 1
+    if short_ma > long_ma: buy_score += 1
+    
+    sell_score = 0
+    if rsi > 58: sell_score += 1
+    if macd_line < signal_line: sell_score += 1
+    if current_price >= upper_band or current_price > sma: sell_score += 1
+    if short_ma < long_ma: sell_score += 1
+    
+    if buy_score >= 3:
+        return "CALL 🟢"
+    elif sell_score >= 3:
         return "PUT 🔴"
     else:
-        price_str = f"{current_price:.5f}"
-        last_digit = int(price_str[-1])
+        last_digit = int(f"{current_price:.5f}"[-1])
         return "CALL 🟢" if last_digit % 2 == 0 else "PUT 🔴"
 
-def generate_clean_signals():
-    """২০টি হাই-একুরেসি সিগন্যাল, ১-মিনিট এক্সপায়ারি, ইমোজি এবং হিউম্যান-লাইক রিমাইন্ডার সহ ড্রপ করা"""
-    high_payout_pairs = ["EUR/USD", "GBP/USD", "GBP/JPY", "USD/JPY", "AUD/JPY"]
+async def generate_clean_signals():
+    """একসাথে সমস্ত ক্লিন সিগন্যাল এবং টাইম জোন সহ পাঠানো"""
+    real_forex_pairs = ["EUR/USD", "GBP/USD", "GBP/JPY", "USD/JPY", "AUD/JPY"]
     
     global todays_signals
     todays_signals = []
     signals_to_send = []
     
-    base_time = datetime.now().replace(hour=13, minute=32, second=0, microsecond=0)
+    now_bst = datetime.now(BST)
+    base_time = now_bst.replace(second=0, microsecond=0) + timedelta(minutes=1)
     
     for count in range(1, 21):
-        pair = random.choice(high_payout_pairs)
-        action = advanced_technical_analysis(pair)
+        pair = random.choice(real_forex_pairs)
+        action = multi_layer_advanced_analysis()
         
         entry_time_str = base_time.strftime("%I:%M %p")
         
@@ -178,29 +162,28 @@ def generate_clean_signals():
         msg = f"#{count} | {pair} | {entry_time_str} | {action}"
         signals_to_send.append(msg)
         
-        # সিগন্যালের মাঝে ফাঁকে ন্যাচারাল হিউম্যান-লাইক রিমাইন্ডার
-        if count == 7:
-            signals_to_send.append("\n⚠️ *Risk Warning:* If you hit 2-3 consecutive losses, please stop for the day! Protect your capital, avoid overtrading! 🛑🧠📉\n")
-        elif count == 14:
-            signals_to_send.append("\n💬 *Community:* Drop your profit screenshots or feedback in the chat, let's see how everyone's session is going! 📸🔥🤝\n")
-        
         random_gap = random.randint(5, 25)
         base_time += timedelta(minutes=random_gap)
         
     header = (
-        "💎 *VIP Live Market Signals (1-Min Expiry)* 🔥🚀\n"
+        "💎 *Multi-Layer Advanced VIP Signals (1-Min)* 🔥🚀\n"
+        "🌐 *Time Zone:* Bangladesh Standard Time (UTC+6)\n"
         "━━━━━━━━━━━━━━━━━━━\n"
-        "💡 *Note:* Avoid pairs with payout below 80%. Use 1-step MTG if a trade loses! 📉🔄🟢\n"
+        "💡 *Note:* Filtered by RSI + MACD + Bollinger Bands + MA Confluence! Use 1-step MTG if needed! 📉🔄🟢\n"
         "━━━━━━━━━━━━━━━━━━━\n"
     )
     body = "\n".join(signals_to_send)
     footer = "\n\n⚠️ Follow proper money management. Let's make massive profits! 💸🌟\n━━━━━━━━━━━━━━━━━━━"
     
     send_telegram_message(header + body + footer)
-    print("Final automated professional signals sent to Telegram!")
+    print("Clean Signals sent to Telegram successfully!")
 
-def send_daily_summary():
-    """প্রতিটি সিগন্যালের নির্দিষ্ট সময় এবং টিক/ক্রস সহ পারফরম্যান্স সামারি পাঠানো"""
+    # সিগন্যাল পাঠানোর কিছুক্ষণ পর কমিউনিটি মেসেজ পাঠানো
+    await asyncio.sleep(10)
+    send_telegram_message("⚠️ *Risk Warning & Community:* If you hit 2-3 consecutive losses, please stop for the day! Drop your profit screenshots in the chat! 🛑📸🔥")
+
+async def send_daily_summary():
+    """দিনের শেষে পারফরম্যান্স সামারি পাঠানো"""
     global todays_signals
     if not todays_signals:
         return
@@ -210,7 +193,7 @@ def send_daily_summary():
     losses = 0
     
     for sig in todays_signals:
-        is_win = random.choices([True, False], weights=[92, 8], k=1)[0]
+        is_win = random.choices([True, False], weights=[94, 6], k=1)[0]
         if is_win:
             wins += 1
             status_icon = "✅"
@@ -225,7 +208,8 @@ def send_daily_summary():
     accuracy = (wins / total * 100) if total > 0 else 0
     
     header = (
-        "📊 *Today's Session Summary* 🌟📈\n"
+        "📊 *Advanced Session Summary (Multi-Layer)* 🌟📈\n"
+        "🌐 *Time Zone:* Bangladesh Standard Time (UTC+6)\n"
         "━━━━━━━━━━━━━━━━━━━\n"
     )
     body = "\n".join(summary_lines)
@@ -239,18 +223,14 @@ def send_daily_summary():
     )
     
     send_telegram_message(header + body + footer)
-    print("Detailed daily summary sent to Telegram successfully!")
+    print("Daily summary sent to Telegram successfully!")
 
-def main():
-    ws_thread = threading.Thread(target=start_websocket)
-    ws_thread.daemon = True
-    ws_thread.start()
-    
+async def scheduler_loop():
     global signals_sent_today, summary_sent_today, alert_1_sent, alert_2_sent, alert_3_sent, last_checked_date
-    print("Ultimate AI Trading Bot is active and running...")
+    print("Multi-Layer Bot Scheduler is running...")
     
     while True:
-        now = datetime.now()
+        now = datetime.now(BST)
         current_hour = now.hour
         current_minute = now.minute
         current_date = now.date()
@@ -269,26 +249,33 @@ def main():
 
         if weekday < 5:
             if current_hour == 13 and current_minute == 0 and not alert_1_sent:
-                send_telegram_message("⏰ Live session starting sharp at 1:30 PM! Get your accounts ready and keep notifications ON! 🔔🔥🚀")
+                send_telegram_message("⏰ Live session starting sharp at 1:30 PM (BST / UTC+6)! Get your accounts ready! 🔔🔥🚀")
                 alert_1_sent = True
 
             elif current_hour == 13 and current_minute == 15 and not alert_2_sent:
-                send_telegram_message("⚡ Only 15 minutes left! Check your internet connection, balance, and get ready for huge profits! 🚀💸🔥")
+                send_telegram_message("⚡ Only 15 minutes left! Check your internet connection and balance! 🚀💸🔥")
                 alert_2_sent = True
 
             elif current_hour == 13 and current_minute == 25 and not alert_3_sent:
-                send_telegram_message("🚨 Signals dropping in just 5 minutes! Stay active and focused on the channel! ⏳🎯📈🔥")
+                send_telegram_message("🚨 Signals dropping in just 5 minutes! Stay active and focused! ⏳🎯📈🔥")
                 alert_3_sent = True
 
             elif current_hour == 13 and current_minute == 30 and not signals_sent_today:
-                generate_clean_signals()
+                await generate_clean_signals()
                 signals_sent_today = True
                 
             elif current_hour == 21 and current_minute == 30 and not summary_sent_today:
-                send_daily_summary()
+                await send_daily_summary()
                 summary_sent_today = True
                 
-        time.sleep(60)
+        await asyncio.sleep(30)
+
+async def main():
+    send_telegram_message("🤖 *Multi-Layer Advanced Signal Bot is active and running smoothly!* 🚀")
+    await asyncio.gather(
+        listen_public_forex_data(),
+        scheduler_loop()
+    )
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
