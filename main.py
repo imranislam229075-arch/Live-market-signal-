@@ -1,18 +1,28 @@
 import time
 import json
+import os
 import requests
 import asyncio
 from datetime import datetime, timedelta, timezone
+import websockets
 
 # Telegram Configuration
 TELEGRAM_BOT_TOKEN = "8543793515:AAEvGOpD2Me8BdXOUNxoCczIYEs3D2r0xlc"
 CHANNEL_CHAT_ID = "@riyafuturelive"
 ADMIN_CHAT_ID = "6647639678"
 
+# Railway Environment Variables থেকে ইমেইল ও পাসওয়ার্ড রিড করার কোড
+QUOTEX_EMAIL = os.getenv("QUOTEX_EMAIL", "imranislam229075@gmail.com")
+QUOTEX_PASSWORD = os.getenv("QUOTEX_PASSWORD", "FQDFFgA9nCaSaMS")
+
+# Quotex URLs
+QUOTEX_LOGIN_URL = "https://qxbroker.com/en/sign-in"
+QUOTEX_WS_URL = "wss://ws2.qxbroker.com/socket.io/?EIO=3&transport=websocket"
+
 # বাংলাদেশ স্ট্যান্ডার্ড টাইম (UTC+6)
 BST = timezone(timedelta(hours=6))
 
-# কোটেক্সের সমস্ত জনপ্রিয় রিয়েল ফরেক্স পেয়ারের লিস্ট
+# কোটেক্সের জনপ্রিয় পেয়ারের লিস্ট
 ALL_COTECK_PAIRS = [
     "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "NZDUSD", 
     "USDCAD", "EURJPY", "GBPJPY", "AUDJPY", "CADJPY", 
@@ -25,6 +35,7 @@ price_history = {}
 todays_signals = []
 last_update_id = 0
 user_states = {}
+auth_cookies = None
 
 def send_telegram_message(chat_id, message, reply_markup=None):
     """নির্দিষ্ট চ্যাট আইডি বা চ্যানেলে মেসেজ পাঠানোর ফাংশন"""
@@ -43,28 +54,74 @@ def send_telegram_message(chat_id, message, reply_markup=None):
     except Exception as e:
         print(f"Telegram Error: {e}")
 
-async def fetch_public_forex_data():
-    """বাইন্যান্স থেকে রিয়েল-টাইম লাইভ প্রাইস এবং হিস্ট্রি কালেকশন"""
-    global live_market_prices, price_history
+def quotex_auto_login():
+    """কোটেক্সে ইমেইল ও পাসওয়ার্ড দিয়ে অটো লগইন করে কুকি ও সেশন সংগ্রহের লজিক"""
+    global auth_cookies
+    session = requests.Session()
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        session.get(QUOTEX_LOGIN_URL, headers=headers, timeout=10)
+        
+        payload = {
+            "email": QUOTEX_EMAIL,
+            "password": QUOTEX_PASSWORD
+        }
+        
+        login_response = session.post("https://qxbroker.com/en/api/v1/login", data=payload, headers=headers, timeout=10)
+        if login_response.status_code == 200:
+            auth_cookies = session.cookies.get_dict()
+            print("Quotex Login Successful! Session cookies acquired.")
+            return True
+        else:
+            print(f"Quotex Login Failed. Status Code: {login_response.status_code}")
+            return False
+    except Exception as e:
+        print(f"Login Error: {e}")
+        return False
+
+async def listen_quotex_websocket():
+    """কোটেক্সের ওয়েব সকেট থেকে লাইভ মার্কেট ডেটা ও প্রাইস রিসিভ করার লজিক"""
+    global live_market_prices, price_history, auth_cookies
+    
     while True:
+        if not auth_cookies:
+            print("Trying to login to Quotex...")
+            success = quotex_auto_login()
+            if not success:
+                await asyncio.sleep(10)
+                continue
+                
         try:
-            for asset in ALL_COTECK_PAIRS:
-                symbol = asset + "USDT" if "USD" in asset else "EURUSDT"
-                url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
-                response = requests.get(url, timeout=3)
-                if response.status_code == 200:
-                    data = response.json()
-                    current_price = float(data.get('price', 0))
-                    if current_price > 0:
-                        live_market_prices[asset] = current_price
-                        if asset not in price_history:
-                            price_history[asset] = []
-                        price_history[asset].append(current_price)
-                        if len(price_history[asset]) > 30:
-                            price_history[asset].pop(0)
+            async with websockets.connect(QUOTEX_WS_URL, ping_interval=20, ping_timeout=20) as websocket:
+                print("Connected to Quotex WebSocket successfully!")
+                async for message in websocket:
+                    try:
+                        if isinstance(message, str) and message.startswith("42"):
+                            data_json = json.loads(message[2:])
+                            event_name = data_json[0] if len(data_json) > 0 else ""
+                            event_data = data_json[1] if len(data_json) > 1 else {}
+                            
+                            if "price" in event_name.lower() or isinstance(event_data, dict):
+                                asset = event_data.get("asset") or event_data.get("symbol")
+                                price = float(event_data.get("price") or event_data.get("rate") or 0)
+                                
+                                if asset and price > 0:
+                                    asset_clean = asset.upper().replace("/", "").replace("_", "")
+                                    if asset_clean in ALL_COTECK_PAIRS:
+                                        live_market_prices[asset_clean] = price
+                                        if asset_clean not in price_history:
+                                            price_history[asset_clean] = []
+                                        price_history[asset_clean].append(price)
+                                        if len(price_history[asset_clean]) > 30:
+                                            price_history[asset_clean].pop(0)
+                    except Exception as inner_e:
+                        pass
         except Exception as e:
-            pass
-        await asyncio.sleep(2)
+            print(f"Quotex WS Connection Error: {e}, reconnecting in 5s...")
+            auth_cookies = None
+            await asyncio.sleep(5)
 
 def analyze_real_market_accuracy(pair, action, entry_price, current_price):
     """রিয়েল মার্কেট মোমেন্টাম ও প্রাইস অ্যাকশন যাচাই করে উইন/লস বের করার লজিক"""
@@ -79,8 +136,8 @@ def analyze_real_market_accuracy(pair, action, entry_price, current_price):
     elif price_diff == 0:
         is_direction_matched = True
 
-    if is_direction_matched and len(history) >= 5:
-        recent_trend = history[-5:]
+    if is_direction_matched and len(history) >= 3:
+        recent_trend = history[-3:]
         momentum_steady = True
         
         if action == "CALL":
@@ -94,7 +151,7 @@ def analyze_real_market_accuracy(pair, action, entry_price, current_price):
                     momentum_steady = False
                     break
                     
-        if momentum_steady or abs(price_diff) >= 0.00005:
+        if momentum_steady or abs(price_diff) >= 0.00001:
             return True
 
     return False
@@ -134,7 +191,7 @@ async def process_multiple_signals(lines):
                 success_count += 1
                 base_time += timedelta(minutes=1)
             else:
-                error_messages.append(f"❌ ভুল পেয়ার বা ডিরেকশন: `{line}` (এই পেয়ার আমাদের লিস্টে নেই বা ফরম্যাট ভুল)")
+                error_messages.append(f"❌ ভুল পেয়ার বা ডিরেকশন: `{line}`")
         else:
             if line.strip():
                 error_messages.append(f"❌ ফরম্যাট ভুল: `{line}`")
@@ -159,7 +216,7 @@ async def process_multiple_signals(lines):
         send_telegram_message(ADMIN_CHAT_ID, f"কিছু লাইনে সমস্যা পাওয়া গেছে:\n{error_text}\n\nসঠিক পেয়ার দিয়ে আবার `/signal` লিখে ট্রাই করুন।")
 
 async def verify_and_send_partial_summary():
-    """রিয়েল মার্কেট ডেটা যাচাই করে আজকের সব সিগন্যালের সম্মিলিত সামারি পাঠানো"""
+    """ওয়েব সকেট ডেটা যাচাই করে আজকের সব সিগন্যালের সম্মিলিত সামারি পাঠানো"""
     global todays_signals
     if not todays_signals:
         send_telegram_message(ADMIN_CHAT_ID, "⚠️ আজ এখনো কোনো সিগন্যাল দেওয়া হয়নি!")
@@ -249,13 +306,13 @@ async def handle_admin_commands():
                             if current_state == 'WAITING_FOR_MULTI_SIGNALS':
                                 user_states[ADMIN_CHAT_ID] = {}
                                 lines = text.split('\n')
-                                send_telegram_message(ADMIN_CHAT_ID, "⏳ রিয়েল মার্কেট এনালাইসিস করে সিগন্যাল তৈরি ও অ্যালার্ট সাজানো হচ্ছে...")
+                                send_telegram_message(ADMIN_CHAT_ID, "⏳ কোটেক্স ডেটা যাচাই করে সিগন্যাল তৈরি করা হচ্ছে...")
                                 await process_multiple_signals(lines)
                                 continue
 
                             if text_lower in ['/start', 'hi', 'hello', 'সালাম']:
                                 send_telegram_message(ADMIN_CHAT_ID, 
-                                    "স্বাগতম বস! 🤖 অ্যালার্ট ও হাই-একুরেসি ট্রেডিং বট সম্পূর্ণ প্রস্তুত।\n\n"
+                                    "স্বাগতম বস! 🤖 কোটেক্স অটো-লগইন ট্রেডিং বট সম্পূর্ণ প্রস্তুত।\n\n"
                                     "আপনার কমান্ড লিস্ট:\n"
                                     "1️⃣ `/signal` - সিগন্যাল ও প্রফেশনাল অ্যালার্টসহ চ্যানেলে পাঠাবে।\n"
                                     "2️⃣ `/summary` - আজকের সব সিগন্যালের সম্মিলিত রেজাল্ট পাঠাবে।\n"
@@ -273,7 +330,7 @@ async def handle_admin_commands():
                                     f"উপলব্ধ পেয়ারসমূহ:\n{pairs_list}"
                                 )
                             elif text_lower in ['/summary', 'সামারি', 'summary']:
-                                send_telegram_message(ADMIN_CHAT_ID, "⏳ আজকের সব সিগন্যালের রিয়েল ডেটা যাচাই করে সামারি তৈরি হচ্ছে...")
+                                send_telegram_message(ADMIN_CHAT_ID, "⏳ কোটেক্স ডেটা যাচাই করে সামারি তৈরি হচ্ছে...")
                                 await verify_and_send_partial_summary()
                             elif text_lower in ['/pairs', 'pairs', 'পেয়ার']:
                                 send_telegram_message(ADMIN_CHAT_ID, f"📋 Available Pairs:\n`{', '.join(ALL_COTECK_PAIRS)}`")
@@ -285,9 +342,9 @@ async def handle_admin_commands():
         await asyncio.sleep(2)
 
 async def main():
-    send_telegram_message(ADMIN_CHAT_ID, "🤖 *Alert-Enabled Trading Bot is Online!* ইনবক্সে `/start` লিখে কমান্ড দিন।")
+    send_telegram_message(ADMIN_CHAT_ID, "🤖 *Quotex Auto-Login Trading Bot is Online!* ইনবক্সে `/start` লিখে কমান্ড দিন।")
     await asyncio.gather(
-        fetch_public_forex_data(),
+        listen_quotex_websocket(),
         handle_admin_commands()
     )
 
