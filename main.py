@@ -2,7 +2,6 @@ import time
 import json
 import requests
 import asyncio
-import websockets
 from datetime import datetime, timedelta, timezone
 import random
 
@@ -13,8 +12,8 @@ CHAT_ID = "@riyafuturelive"
 # বাংলাদেশ টাইমজোন (UTC+6)
 BST = timezone(timedelta(hours=6))
 
-# পাবলিক রিয়েল-টাইম ফরেক্স মার্কেট ডেটা ফিড
-FOREX_WS_URL = "wss://stream.binance.com:9443/ws/eurusdt@ticker"
+# বাইন্যান্স পাবলিক ফরেক্স/কারেন্সি REST API URL (WebSocket এর পরিবর্তে HTTP API)
+BINANCE_API_URL = "https://api.binance.com/api/v3/ticker/price?symbol=EURUSDT"
 
 # গ্লোবাল ভেরিয়েবলস
 live_market_prices = {}
@@ -40,24 +39,31 @@ def send_telegram_message(message):
     except Exception as e:
         print(f"Telegram Error: {e}")
 
-async def listen_public_forex_data():
-    """পাবলিক মার্কেট থেকে রিয়েল-টাইম প্রাইস এবং হিস্ট্রি কালেকশন"""
+async def fetch_public_forex_data():
+    """HTTP API ব্যবহার করে রেলওয়ে থেকে নির্বিঘ্নে রিয়েল-টাইম প্রাইস ও হিস্ট্রি কালেকশন"""
     global live_market_prices, price_history
     while True:
         try:
-            async with websockets.connect(FOREX_WS_URL) as websocket:
-                print("Connected to Multi-Layer Advanced Forex WebSocket successfully!")
-                async for message in websocket:
-                    data = json.loads(message)
-                    current_price = float(data.get('c', 0))
-                    if current_price > 0:
-                        live_market_prices["EUR/USD"] = current_price
-                        price_history.append(current_price)
-                        if len(price_history) > 100:
-                            price_history.pop(0)
+            # ক্লাউডফ্লেয়ার ব্লক এড়ানোর জন্য সাধারণ হেডার ব্যবহার করা হলো
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+            }
+            response = requests.get(BINANCE_API_URL, headers=headers, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                current_price = float(data.get('price', 0))
+                if current_price > 0:
+                    live_market_prices["EUR/USD"] = current_price
+                    price_history.append(current_price)
+                    if len(price_history) > 100:
+                        price_history.pop(0)
+            else:
+                print(f"API HTTP Status: {response.status_code}")
         except Exception as e:
-            print(f"WebSocket Connection Error: {e}. Reconnecting...")
-            await asyncio.sleep(5)
+            print(f"API Fetch Error: {e}")
+        
+        # প্রতি ৫ সেকেন্ড পর পর প্রাইস আপডেট করবে
+        await asyncio.sleep(5)
 
 def calculate_rsi(prices, period=14):
     """লেয়ার ১: RSI ক্যালকুলেশন"""
@@ -253,7 +259,8 @@ async def scheduler_loop():
                 alert_1_sent = True
 
             elif current_hour == 13 and current_minute == 15 and not alert_2_sent:
-                send_telegram_message("⚡ Only 15 minutes left! Check your internet connection and balance! 🚀💸🔥")
+                send_pencil_msg = "⚡ Only 15 minutes left! Check your internet connection and balance! 🚀💸🔥"
+                send_telegram_message(send_pencil_msg)
                 alert_2_sent = True
 
             elif current_hour == 13 and current_minute == 25 and not alert_3_sent:
@@ -273,7 +280,7 @@ async def scheduler_loop():
 async def main():
     send_telegram_message("🤖 *Multi-Layer Advanced Signal Bot is active and running smoothly!* 🚀")
     await asyncio.gather(
-        listen_public_forex_data(),
+        fetch_public_forex_data(),
         scheduler_loop()
     )
 
