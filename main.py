@@ -47,9 +47,9 @@ async def fetch_public_forex_data():
     """বাইন্যান্স থেকে রিয়েল-টাইম লাইভ প্রাইস এবং হিস্ট্রি কালেকশন"""
     global live_market_prices, price_history
     while True:
-        for asset in ALL_COTECK_PAIRS:
-            symbol = asset + "USDT" if "USD" in asset else "EURUSDT"
-            try:
+        try:
+            for asset in ALL_COTECK_PAIRS:
+                symbol = asset + "USDT" if "USD" in asset else "EURUSDT"
                 url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
                 response = requests.get(url, timeout=3)
                 if response.status_code == 200:
@@ -62,8 +62,8 @@ async def fetch_public_forex_data():
                         price_history[asset].append(current_price)
                         if len(price_history[asset]) > 30:
                             price_history[asset].pop(0)
-            except Exception as e:
-                pass
+        except Exception as e:
+            pass
         await asyncio.sleep(2)
 
 def analyze_real_market_accuracy(pair, action, entry_price, current_price):
@@ -98,31 +98,6 @@ def analyze_real_market_accuracy(pair, action, entry_price, current_price):
             return True
 
     return False
-
-async def send_automatic_trading_alerts():
-    """ট্রেডারদের উদ্বুদ্ধ করতে এবং লাইভ উপস্থিতি বোঝাতে ব্যাকগ্রাউন্ড অটো-অ্যালার্ট সিস্টেম"""
-    await asyncio.sleep(10)
-    while True:
-        try:
-            now_bst = datetime.now(BST)
-            hour = now_bst.hour
-            
-            # দিন বা সন্ধ্যার একটিভ ট্রেডিং সময়ে অটো এনগেজমেন্ট অ্যালার্ট পাঠানো
-            motivation_messages = [
-                "🔥 *Attention Traders!* মার্কেট খুব সুন্দর মুভমেন্ট দিচ্ছে। সবাই মানি ম্যানেজমেন্ট স্ট্রিক্টলি ফলো করুন এবং রেডি থাকুন। পরবর্তী সিগন্যালের জন্য `/signal` কমান্ড ব্যবহার করুন! 🚀",
-                "💡 *Pro Tip:* হুজুগে ট্রেড করবেন না। আমাদের সিগন্যাল এবং ১-স্টেপ MTG রুল মেনে চলুন, প্রফিট আপনার পকেটে আসবেই ইনশাআল্লাহ! 📈💰",
-                "⚠️ *Risk Warning:* বাইনারি ট্রেডিং এ প্রফিটের পাশাপাশি ডিসিপ্লিন সবচেয়ে জরুরি। লোভ সংবরণ করে টার্গেট হিট হলে মার্কেট থেকে বের হয়ে যান! 🎯",
-                "👑 অ্যাডমিন আপনাদের সাথে লাইভ মার্কেটে আছি। যেকোনো প্রয়োজনে প্রস্তুত থাকুন, বড় প্রফিট আসছে! 🔥📸"
-            ]
-            
-            # রেন্ডম বা নির্দিষ্ট সময়ে চ্যানেলে এলার্ট পাঠানো যেতে পারে (যেমন প্রতি ২ ঘণ্টা পর পর একটি করে মোটিভেশনাল রিমাইন্ডার)
-            # অথবা সিগন্যালের সাথে এলার্ট যাবে। এখানে একটিভ প্রেজেন্স বোঝানোর মেসেজ সেট করা হলো:
-            # send_telegram_message(CHANNEL_CHAT_ID, motivation_messages[now_bst.minute % len(motivation_messages)])
-            
-        except Exception as e:
-            print(f"Alert Error: {e}")
-            
-        await asyncio.sleep(3600) # প্রতি ১ ঘণ্টা পর পর বা প্রয়োজন অনুযায়ী
 
 async def process_multiple_signals(lines):
     """একাধিক পেয়ার ও ডিরেকশন পার্স করে রিয়েল সিগন্যাল চ্যানেলে পাঠানো এবং ইনস্ট্যান্ট অ্যালার্ট"""
@@ -159,7 +134,7 @@ async def process_multiple_signals(lines):
                 success_count += 1
                 base_time += timedelta(minutes=1)
             else:
-                error_messages.append(f"❌ ভুল পেয়ার বা ডিরেকশন: `{line}`")
+                error_messages.append(f"❌ ভুল পেয়ার বা ডিরেকশন: `{line}` (এই পেয়ার আমাদের লিস্টে নেই বা ফরম্যাট ভুল)")
         else:
             if line.strip():
                 error_messages.append(f"❌ ফরম্যাট ভুল: `{line}`")
@@ -167,7 +142,6 @@ async def process_multiple_signals(lines):
     if signals_to_send:
         body = "\n".join(signals_to_send)
         header = "🎯 *VIP Live Market Signals* 🚀\n━━━━━━━━━━━━━━━━━━━\n"
-        # এখানে ট্রেডারদের উদ্বুদ্ধ করার জন্য আকর্ষণীয় অ্যালার্ট নোট জুড়ে দেওয়া হলো
         footer = (
             "\n━━━━━━━━━━━━━━━━━━━\n"
             "⚠️ *Trading Rules & Alerts:*\n"
@@ -178,14 +152,14 @@ async def process_multiple_signals(lines):
         )
         
         send_telegram_message(CHANNEL_CHAT_ID, header + body + footer)
-        send_telegram_message(ADMIN_CHAT_ID, f"✅ সফলভাবে মোট `{success_count}` টি রিয়েল সিগন্যাল চ্যানেলে ড্রপ করা হয়েছে এবং সাথে প্রফেশনাল অ্যালার্ট যুক্ত করা হয়েছে!")
+        send_telegram_message(ADMIN_CHAT_ID, f"✅ সফলভাবে মোট `{success_count}` টি রিয়েল সিগন্যাল চ্যানেলে ড্রপ করা হয়েছে!")
         
     if error_messages:
         error_text = "\n".join(error_messages)
-        send_telegram_message(ADMIN_CHAT_ID, f"কিছু লাইনে সমস্যা ছিল:\n{error_text}\n\nসঠিক নিয়মে দিতে চাইলে আবার `/signal` লিখুন।")
+        send_telegram_message(ADMIN_CHAT_ID, f"কিছু লাইনে সমস্যা পাওয়া গেছে:\n{error_text}\n\nসঠিক পেয়ার দিয়ে আবার `/signal` লিখে ট্রাই করুন।")
 
 async def verify_and_send_partial_summary():
-    """রিয়েল মার্কেট ডেটা ও মোমেন্টাম যাচাই করে সামারি এবং মেম্বারদের মোটিভেট করার জন্য এলার্ট পাঠানো"""
+    """রিয়েল মার্কেট ডেটা যাচাই করে আজকের সব সিগন্যালের সম্মিলিত সামারি পাঠানো"""
     global todays_signals
     if not todays_signals:
         send_telegram_message(ADMIN_CHAT_ID, "⚠️ আজ এখনো কোনো সিগন্যাল দেওয়া হয়নি!")
@@ -223,7 +197,6 @@ async def verify_and_send_partial_summary():
     total_completed = len(completed_signals)
     accuracy = (total_successful / total_completed * 100) if total_completed > 0 else 0
     
-    # একুরেসি অনুযায়ী কাস্টমার বা ট্রেডারদের উদ্বুদ্ধ করার বিশেষ মেসেজ
     motivation_note = "দারুণ সেশন যাচ্ছে সবার! 🎉 এভাবেই ডিসিপ্লিন ধরে ট্রেড করুন।"
     if accuracy >= 80:
         motivation_note = "🔥 অসাধারণ একুরেসি! আমাদের ভিআইপি মেম্বাররা আগুন ঝরাচ্ছে বাজারে! 🚀💰"
@@ -244,7 +217,7 @@ async def verify_and_send_partial_summary():
     )
     
     send_telegram_message(CHANNEL_CHAT_ID, header + body + footer)
-    send_telegram_message(ADMIN_CHAT_ID, f"📊 মোট `{total_completed}` টি শেষ হওয়া সিগন্যালের রিয়েল সামারি ও এলার্ট পাঠানো হয়েছে!")
+    send_telegram_message(ADMIN_CHAT_ID, f"📊 আজকের মোট `{total_completed}` টি শেষ হওয়া সিগন্যালের সম্মিলিত রিয়েল সামারি পাঠানো হয়েছে!")
 
 async def handle_admin_commands():
     """ইনবক্স থেকে কমান্ড এবং ইউজার স্টেট হ্যান্ডেল করার লজিক"""
@@ -285,7 +258,7 @@ async def handle_admin_commands():
                                     "স্বাগতম বস! 🤖 অ্যালার্ট ও হাই-একুরেসি ট্রেডিং বট সম্পূর্ণ প্রস্তুত।\n\n"
                                     "আপনার কমান্ড লিস্ট:\n"
                                     "1️⃣ `/signal` - সিগন্যাল ও প্রফেশনাল অ্যালার্টসহ চ্যানেলে পাঠাবে।\n"
-                                    "2️⃣ `/summary` - রেজাল্ট ও মোটিভেশনাল নোটসহ সামারি পাঠাবে।\n"
+                                    "2️⃣ `/summary` - আজকের সব সিগন্যালের সম্মিলিত রেজাল্ট পাঠাবে।\n"
                                     "3️⃣ `/pairs` - পেয়ারের লিস্ট দেখবে।"
                                 )
                             elif text_lower in ['/signal', 'সিগন্যাল', 'signal']:
@@ -300,7 +273,7 @@ async def handle_admin_commands():
                                     f"উপলব্ধ পেয়ারসমূহ:\n{pairs_list}"
                                 )
                             elif text_lower in ['/summary', 'সামারি', 'summary']:
-                                send_telegram_message(ADMIN_CHAT_ID, "⏳ রিয়েল মার্কেট ডেটা যাচাই করে সামারি তৈরি হচ্ছে...")
+                                send_telegram_message(ADMIN_CHAT_ID, "⏳ আজকের সব সিগন্যালের রিয়েল ডেটা যাচাই করে সামারি তৈরি হচ্ছে...")
                                 await verify_and_send_partial_summary()
                             elif text_lower in ['/pairs', 'pairs', 'পেয়ার']:
                                 send_telegram_message(ADMIN_CHAT_ID, f"📋 Available Pairs:\n`{', '.join(ALL_COTECK_PAIRS)}`")
@@ -313,11 +286,13 @@ async def handle_admin_commands():
 
 async def main():
     send_telegram_message(ADMIN_CHAT_ID, "🤖 *Alert-Enabled Trading Bot is Online!* ইনবক্সে `/start` লিখে কমান্ড দিন।")
-    asyncio.gather(
+    await asyncio.gather(
         fetch_public_forex_data(),
-        handle_admin_commands(),
-        send_automatic_trading_alerts()
+        handle_admin_commands()
     )
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
