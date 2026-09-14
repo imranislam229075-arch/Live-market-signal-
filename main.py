@@ -25,11 +25,6 @@ live_market_prices = {}
 price_history = {}
 todays_signals = []
 selected_pairs = ALL_COTECK_PAIRS.copy()
-signals_sent_today = False
-summary_sent_today = False
-alert_1_sent = False
-alert_3_sent = False
-selection_sent_today = False
 last_update_id = 0
 
 def send_telegram_message(chat_id, message, reply_markup=None):
@@ -87,37 +82,11 @@ def fast_momentum_analysis(asset):
     else:
         return "CALL"
 
-async def send_pair_selection_prompt():
-    """সিগন্যাল শুরু হওয়ার ১৫ মিনিট আগে এডমিনের পার্সোনাল ইনবক্সে ফুল পেয়ার লিস্ট পাঠানো"""
-    global selected_pairs
-    
-    keyboard_rows = []
-    for i in range(0, len(ALL_COTECK_PAIRS), 2):
-        row = []
-        status_1 = "✅" if ALL_COTECK_PAIRS[i] in selected_pairs else "❌"
-        row.append({"text": f"{status_1} {ALL_COTECK_PAIRS[i]}", "callback_data": f"toggle_{ALL_COTECK_PAIRS[i]}"})
-        if i + 1 < len(ALL_COTECK_PAIRS):
-            status_2 = "✅" if ALL_COTECK_PAIRS[i+1] in selected_pairs else "❌"
-            row.append({"text": f"{status_2} {ALL_COTECK_PAIRS[i+1]}", "callback_data": f"toggle_{ALL_COTECK_PAIRS[i+1]}"})
-        keyboard_rows.append(row)
-        
-    keyboard_rows.append([{"text": "🚀 Confirm & Lock Pairs", "callback_data": "confirm_pairs"}])
-    
-    keyboard = {"inline_keyboard": keyboard_rows}
-    msg = (
-        "🎛 *Admin Control Panel (All Pairs)*\n"
-        "━━━━━━━━━━━━━━━━━━━\n"
-        "Upcoming session starts in 15 minutes (1:30 PM).\n"
-        "Tap any pair to toggle on/off, then click Confirm!"
-    )
-    send_telegram_message(ADMIN_CHAT_ID, msg, reply_markup=keyboard)
-
-async def generate_clean_signals():
-    """সিলেকশন করা পেয়ারগুলোর ভিত্তিতে নিখুঁত এবং ক্লিন সিগন্যাল জেনারেট করা"""
+async def generate_and_send_signals():
+    """সিগন্যাল তৈরি করে চ্যানেলে পাঠিয়ে দেওয়া"""
     global todays_signals, selected_pairs
     
     pairs_to_use = selected_pairs if selected_pairs else ALL_COTECK_PAIRS
-    
     todays_signals = []
     signals_to_send = []
     
@@ -131,12 +100,13 @@ async def generate_clean_signals():
         entry_time_str = base_time.strftime("%I:%M")
         entry_price = live_market_prices.get(pair, 1.0000)
         
+        # শিডিউল অবজেক্ট তৈরি (টাইপ টাইম তুলনা করার জন্য datetime অবজেক্ট সেভ রাখা হলো)
         signal_data = {
             "asset": pair,
             "action": action,
             "entry_time": entry_time_str,
-            "entry_price": entry_price,
-            "result": "PENDING"
+            "datetime_obj": base_time,
+            "entry_price": entry_price
         }
         todays_signals.append(signal_data)
         
@@ -150,18 +120,29 @@ async def generate_clean_signals():
     
     send_telegram_message(CHANNEL_CHAT_ID, body)
     send_telegram_message(CHANNEL_CHAT_ID, "⚠️ Use 1-step MTG if needed! 🚀 Manage your risk properly and drop your profit screenshots after winning! 🛑📸")
+    send_telegram_message(ADMIN_CHAT_ID, f"✅ মোট `{len(todays_signals)}` টি নতুন সিগন্যাল জেনারেট করে চ্যানেলে পাঠানো হয়েছে!")
 
-async def verify_and_send_summary():
-    """রিয়েল-টাইম প্রাইস মুভমেন্ট এবং ১-স্টেপ এমটিজি মিলিয়ে ১০০% অথেন্টিক সামারি তৈরি"""
+async def verify_and_send_partial_summary():
+    """শুধু যে সিগন্যালগুলোর সময় পার হয়ে গেছে, কেবল সেগুলোর সামারি তৈরি করা"""
     global todays_signals
     if not todays_signals:
+        send_telegram_message(ADMIN_CHAT_ID, "⚠️ আজ এখনো কোনো সিগন্যাল জেনারেট করা হয়নি!")
         return
         
+    now_bst = datetime.now(BST)
+    
+    # যে সিগন্যালগুলোর টাইম বর্তমান সময় বা তার আগের (অর্থাৎ সময় শেষ হয়েছে), শুধু সেগুলো ফিল্টার করা
+    completed_signals = [sig for sig in todays_signals if sig['datetime_obj'] <= now_bst]
+    
+    if not completed_signals:
+        send_telegram_message(ADMIN_CHAT_ID, "⏳ এই মুহূর্তে কোনো সিগন্যালের সময় শেষ হয়নি। একটু পরে আবার ট্রাই করুন!")
+        return
+
     summary_lines = []
     total_successful = 0
     losses = 0
     
-    for sig in todays_signals:
+    for sig in completed_signals:
         pair = sig['asset']
         action = sig['action']
         
@@ -187,11 +168,11 @@ async def verify_and_send_summary():
         line = f"{pair}  {sig['entry_time']}  {action}  {status_icon}"
         summary_lines.append(line)
         
-    total_signals = len(todays_signals)
-    accuracy = (total_successful / total_signals * 100) if total_signals > 0 else 0
+    total_completed = len(completed_signals)
+    accuracy = (total_successful / total_completed * 100) if total_completed > 0 else 0
     
     header = (
-        "📊 *Session Results* 🚀\n"
+        f"📊 *Partial Session Results* ({total_completed}/{len(todays_signals)} Completed) 🚀\n"
         "━━━━━━━━━━━━━━━━━━━\n"
     )
     body = "\n".join(summary_lines)
@@ -199,13 +180,15 @@ async def verify_and_send_summary():
         f"\n━━━━━━━━━━━━━━━━━━━\n"
         f"✅ Wins: `{total_successful}` | ❌ Loss: `{losses}`\n"
         f"🎯 Accuracy: `{accuracy:.1f}%`\n"
-        f"See you tomorrow! 🔥"
+        f"চলমান সিগন্যালগুলোর সময় শেষ হলে আবার সামারি চাইতে পারেন! 🔥"
     )
     
+    # চ্যানেলে এবং আপনার ইনবক্সে সামারি পাঠিয়ে দেওয়া
     send_telegram_message(CHANNEL_CHAT_ID, header + body + footer)
+    send_telegram_message(ADMIN_CHAT_ID, f"📊 মোট `{total_completed}` টি শেষ হওয়া সিগন্যালের সামারি সফলভাবে পাঠানো হয়েছে!")
 
-async def check_admin_messages():
-    """অ্যাডমিনের পার্সোনাল ইনবক্সের মেসেজ এবং বাটন ক্লিক হ্যান্ডেল করা"""
+async def handle_admin_commands():
+    """অ্যাডমিনের কমান্ড হ্যান্ডেল করার মূল লজিক"""
     global last_update_id, selected_pairs
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
     
@@ -218,99 +201,43 @@ async def check_admin_messages():
                 for result in data.get('result', []):
                     last_update_id = result['update_id']
                     
-                    # ইনলাইন বাটন ক্লিক হ্যান্ডেল
-                    if 'callback_query' in result:
-                        cq = result['callback_query']
-                        query_id = cq['id']
-                        data_str = cq['data']
-                        user_chat_id = str(cq['from']['id'])
-                        
-                        if user_chat_id == ADMIN_CHAT_ID:
-                            if data_str.startswith("toggle_"):
-                                pair_name = data_str.replace("toggle_", "")
-                                if pair_name in selected_pairs:
-                                    selected_pairs.remove(pair_name)
-                                    ans_text = f"❌ {pair_name} removed from active list."
-                                else:
-                                    selected_pairs.append(pair_name)
-                                    ans_text = f"✅ {pair_name} added to active list."
-                                    
-                                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", 
-                                              json={'callback_query_id': query_id, 'text': ans_text})
-                                              
-                            elif data_str == "confirm_pairs":
-                                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", 
-                                              json={'callback_query_id': query_id, 'text': "Pairs locked successfully for today!"})
-                                send_telegram_message(ADMIN_CHAT_ID, f"🔒 *Active Pairs Locked:*\n`{', '.join(selected_pairs)}`")
-                                
-                    # পার্সোনাল চ্যাট মেসেজ বা কথা বলা হ্যান্ডেল
-                    elif 'message' in result:
+                    if 'message' in result:
                         msg = result['message']
                         user_chat_id = str(msg['from']['id'])
                         text = msg.get('text', '')
                         
-                        if user_chat_id == ADMIN_CHAT_ID:
+                        if user_chat_id == str(ADMIN_CHAT_ID):
                             text_lower = text.lower()
+                            
                             if text_lower in ['/start', 'hi', 'hello', 'সালাম']:
-                                send_telegram_message(ADMIN_CHAT_ID, "স্বাগতম বস! আপনার বট ফুললি একটিভ আছে। আপনি চাইলে আমাকে যেকোনো সময় মেসেজ করতে পারেন বা `/pairs` লিখে বর্তমান একটিভ পেয়ার দেখতে পারেন।")
-                            elif text_lower in ['/pairs', 'pairs', 'পেয়ার']:
-                                send_telegram_message(ADMIN_CHAT_ID, f"📋 Current Active Pairs:\n`{', '.join(selected_pairs)}`")
+                                send_telegram_message(ADMIN_CHAT_ID, 
+                                    "স্বাগতম বস! 🤖 স্মার্ট কন্ট্রোল বট রেডি।\n\n"
+                                    "আপনার কমান্ড লিস্ট:\n"
+                                    "1️⃣ `/signal` বা `সিগন্যাল` - নতুন সিগন্যাল তৈরি করে চ্যানেলে পাঠাবে।\n"
+                                    "2️⃣ `/summary` বা `সামারি` - যতগুলো সিগন্যালের সময় শেষ হয়েছে, শুধু সেগুলোর সামারি পাঠাবে।\n"
+                                    "3️⃣ `/alert` বা `এলার্ট` - চ্যানেলে সেশন অ্যালার্ট পাঠাবে।"
+                                )
+                            elif text_lower in ['/signal', 'সিগন্যাল', 'signal']:
+                                send_telegram_message(ADMIN_CHAT_ID, "⏳ সিগন্যাল তৈরি করা হচ্ছে...")
+                                await generate_and_send_signals()
+                            elif text_lower in ['/summary', 'সামারি', 'summary']:
+                                send_telegram_message(ADMIN_CHAT_ID, "⏳ শেষ হওয়া সিগন্যালগুলো চেক করে সামারি তৈরি করা হচ্ছে...")
+                                await verify_and_send_partial_summary()
+                            elif text_lower in ['/alert', 'এলার্ট', 'alert']:
+                                send_telegram_message(CHANNEL_CHAT_ID, "⏰ Live session is starting soon! Get ready! 🔔")
+                                send_telegram_message(ADMIN_CHAT_ID, "📢 চ্যানেলে অ্যালার্ট পাঠানো হয়েছে!")
                             else:
-                                send_telegram_message(ADMIN_CHAT_ID, f"আপনার কথা বুঝতে পেরেছি: \"{text}\"। বট ব্যাকগ্রাউন্ডে ঠিকমতো রান করছে!")
+                                send_telegram_message(ADMIN_CHAT_ID, f"আপনার মেসেজ পেয়েছি: \"{text}\"। সিগন্যাল বা সামারি চাইলে `/signal` বা `/summary` লিখুন!")
         except Exception as e:
+            print(f"Command Error: {e}")
             pass
         await asyncio.sleep(2)
 
-async def scheduler_loop():
-    global signals_sent_today, summary_sent_today, alert_1_sent, alert_3_sent, selection_sent_today, last_checked_date
-    
-    while True:
-        now = datetime.now(BST)
-        current_hour = now.hour
-        current_minute = now.minute
-        current_date = now.date()
-        weekday = now.weekday()
-        
-        try:
-            if last_checked_date != current_date:
-                signals_sent_today = False
-                summary_sent_today = False
-                alert_1_sent = False
-                alert_3_sent = False
-                selection_sent_today = False
-                last_checked_date = current_date
-        except NameError:
-            last_checked_date = current_date
-
-        if weekday < 5:
-            if current_hour == 13 and current_minute == 0 and not alert_1_sent:
-                send_telegram_message(CHANNEL_CHAT_ID, "⏰ Live session starting sharp at 1:30 PM (BST)! Get ready! 🔔")
-                alert_1_sent = True
-
-            elif current_hour == 13 and current_minute == 15 and not selection_sent_today:
-                await send_pair_selection_prompt()
-                selection_sent_today = True
-
-            elif current_hour == 13 and current_minute == 25 and not alert_3_sent:
-                send_telegram_message(CHANNEL_CHAT_ID, "🚨 Signals dropping in 5 minutes! Stay active! ⏳")
-                alert_3_sent = True
-
-            elif current_hour == 13 and current_minute == 30 and not signals_sent_today:
-                await generate_clean_signals()
-                signals_sent_today = True
-                
-            elif current_hour == 21 and current_minute == 30 and not summary_sent_today:
-                await verify_and_send_summary()
-                summary_sent_today = True
-                
-        await asyncio.sleep(30)
-
 async def main():
-    send_telegram_message(CHANNEL_CHAT_ID, "🤖 *Bot is active with Chat, All Pairs & Real-Market Logic!* 🚀")
+    send_telegram_message(ADMIN_CHAT_ID, "🤖 *Smart Control Bot is Online!* ইনবক্সে `/start` লিখে কমান্ড দিন।")
     await asyncio.gather(
         fetch_public_forex_data(),
-        check_admin_messages(),
-        scheduler_loop()
+        handle_admin_commands()
     )
 
 if __name__ == "__main__":
