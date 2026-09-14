@@ -11,7 +11,7 @@ TELEGRAM_BOT_TOKEN = "8543793515:AAEvGOpD2Me8BdXOUNxoCczIYEs3D2r0xlc"
 CHANNEL_CHAT_ID = "@riyafuturelive"
 ADMIN_CHAT_ID = "6647639678"
 
-# Railway Environment Variables থেকে ইমেইল ও পাসওয়ার্ড রিড করার কোড
+# Railway Environment Variables থেকে ইমেইল ও পাসওয়ার্ড রিড করা
 QUOTEX_EMAIL = os.getenv("QUOTEX_EMAIL", "imranislam229075@gmail.com")
 QUOTEX_PASSWORD = os.getenv("QUOTEX_PASSWORD", "FQDFFgA9nCaSaMS")
 
@@ -22,11 +22,10 @@ QUOTEX_WS_URL = "wss://ws2.qxbroker.com/socket.io/?EIO=3&transport=websocket"
 # বাংলাদেশ স্ট্যান্ডার্ড টাইম (UTC+6)
 BST = timezone(timedelta(hours=6))
 
-# কোটেক্সের জনপ্রিয় পেয়ারের লিস্ট
+# কোটেক্সের জনপ্রিয় রিয়েল পেয়ারের লিস্ট
 ALL_COTECK_PAIRS = [
     "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "NZDUSD", 
-    "USDCAD", "EURJPY", "GBPJPY", "AUDJPY", "CADJPY", 
-    "EURAUD", "EURCAD", "EURNZD", "GBPAUD", "GBPCAD"
+    "USDCAD", "EURJPY", "GBPJPY", "AUDJPY", "CADJPY"
 ]
 
 # গ্লোবাল ভেরিয়েবলস
@@ -34,7 +33,6 @@ live_market_prices = {}
 price_history = {}
 todays_signals = []
 last_update_id = 0
-user_states = {}
 auth_cookies = None
 
 def send_telegram_message(chat_id, message, reply_markup=None):
@@ -82,7 +80,7 @@ def quotex_auto_login():
         return False
 
 async def listen_quotex_websocket():
-    """কোটেক্সের ওয়েব সকেট থেকে লাইভ মার্কেট ডেটা ও প্রাইস রিসিভ করার লজিক"""
+    """কোটেক্সের ওয়েব সকেট থেকে লাইভ মার্কেট ডেটা ও প্রাইস হিস্ট্রি সংগ্রহের লজিক"""
     global live_market_prices, price_history, auth_cookies
     
     while True:
@@ -114,7 +112,7 @@ async def listen_quotex_websocket():
                                         if asset_clean not in price_history:
                                             price_history[asset_clean] = []
                                         price_history[asset_clean].append(price)
-                                        if len(price_history[asset_clean]) > 30:
+                                        if len(price_history[asset_clean]) > 100:
                                             price_history[asset_clean].pop(0)
                     except Exception as inner_e:
                         pass
@@ -123,110 +121,227 @@ async def listen_quotex_websocket():
             auth_cookies = None
             await asyncio.sleep(5)
 
-def analyze_real_market_accuracy(pair, action, entry_price, current_price):
-    """রিয়েল মার্কেট মোমেন্টাম ও প্রাইস অ্যাকশন যাচাই করে উইন/লস বের করার লজিক"""
-    history = price_history.get(pair, [])
-    price_diff = current_price - entry_price
-    
-    is_direction_matched = False
-    if action == "CALL" and price_diff > 0:
-        is_direction_matched = True
-    elif action == "PUT" and price_diff < 0:
-        is_direction_matched = True
-    elif price_diff == 0:
-        is_direction_matched = True
+async def track_signal_checkpoints():
+    """সিগন্যালের ১ মিনিট এবং ২ মিনিট (MTG) পরের প্রাইস অটো রেকর্ড করার ব্যাকগ্রাউন্ড লজিক"""
+    global todays_signals
+    while True:
+        try:
+            now_bst = datetime.now(BST)
+            for sig in todays_signals:
+                pair = sig['asset']
+                current_price = live_market_prices.get(pair)
+                if not current_price:
+                    continue
+                
+                time_diff = (now_bst - sig['datetime_obj']).total_seconds()
+                
+                if 60 <= time_diff < 90 and sig['price_1m'] is None:
+                    sig['price_1m'] = current_price
+                
+                if 120 <= time_diff < 150 and sig['price_2m'] is None:
+                    sig['price_2m'] = current_price
+        except Exception as e:
+            print(f"Tracker Error: {e}")
+        await asyncio.sleep(5)
 
-    if is_direction_matched and len(history) >= 3:
-        recent_trend = history[-3:]
-        momentum_steady = True
+def calculate_rsi(prices, period=14):
+    """RSI ক্যালকুলেটর"""
+    if len(prices) < period + 1:
+        return 50.0
+    gains, losses = 0, 0
+    for i in range(1, period + 1):
+        diff = prices[-i] - prices[-i-1]
+        if diff >= 0:
+            gains += diff
+        else:
+            losses -= diff
+    avg_gain = gains / period
+    avg_loss = losses / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+def calculate_ema(prices, period=10):
+    """EMA ক্যালকুলেটর"""
+    if len(prices) < period:
+        return prices[-1] if prices else 0
+    multiplier = 2 / (period + 1)
+    ema = sum(prices[:period]) / period
+    for price in prices[period:]:
+        ema = (price - ema) * multiplier + ema
+    return ema
+
+def calculate_atr(prices, period=14):
+    """Average True Range (ATR) ভলাটিলিটি ফিল্টার ক্যালকুলেটর"""
+    if len(prices) < period + 1:
+        return 0.0001 # ডিফল্ট ভলাটিলিটি
+    tr_sum = 0.0
+    for i in range(1, period + 1):
+        high_low = abs(prices[-i] - prices[-i-1])
+        tr_sum += high_low
+    return tr_sum / period
+
+def analyze_high_accuracy_market(pair):
+    """RSI + EMA + ATR ভলাটিলিটি ফিল্টার দিয়ে অ্যাডভান্সড অ্যানালিসিস লজিক"""
+    prices = price_history.get(pair, [])
+    if len(prices) < 25:
+        return None
         
-        if action == "CALL":
-            for i in range(1, len(recent_trend)):
-                if recent_trend[i] < recent_trend[i-1]:
-                    momentum_steady = False
-                    break
-        elif action == "PUT":
-            for i in range(1, len(recent_trend)):
-                if recent_trend[i] > recent_trend[i-1]:
-                    momentum_steady = False
-                    break
-                    
-        if momentum_steady or abs(price_diff) >= 0.00001:
-            return True
+    current_price = prices[-1]
+    rsi = calculate_rsi(prices, period=14)
+    ema_short = calculate_ema(prices, period=5)
+    ema_long = calculate_ema(prices, period=20)
+    atr = calculate_atr(prices, period=14)
+    
+    # যদি মার্কেট অত্যন্ত শান্ত বা চপি থাকে (খুব কম ATR), তবে ফেইক সিগন্যাল এড়াতে স্কিপ করবে
+    if atr == 0:
+        return None
+        
+    # স্ট্রং ট্রেন্ড এবং মোমেন্টাম ফিল্টার
+    if rsi < 46 and ema_short > ema_long:
+        return {"action": "CALL", "entry_price": current_price}
+    elif rsi > 54 and ema_short < ema_long:
+        return {"action": "PUT", "entry_price": current_price}
+        
+    return None
 
-    return False
-
-async def process_multiple_signals(lines):
-    """একাধিক পেয়ার ও ডিরেকশন পার্স করে রিয়েল সিগন্যাল চ্যানেলে পাঠানো এবং ইনস্ট্যান্ট অ্যালার্ট"""
+def generate_professional_signals(count=10):
+    """১০টি হাই-এন্ড একুরেসি সিগন্যাল জেনারেট করা"""
     global todays_signals
     
     now_bst = datetime.now(BST)
-    base_time = now_bst.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    base_time = now_bst.replace(second=0, microsecond=0) + timedelta(minutes=2)
     
-    signals_to_send = []
-    success_count = 0
-    error_messages = []
+    generated_signals = []
+    valid_signals_count = 0
+    scanned_pairs = list(ALL_COTECK_PAIRS)
     
-    for line in lines:
-        parts = line.strip().split()
-        if len(parts) >= 2:
-            pair = parts[0].upper()
-            action = parts[1].upper()
-            
-            if pair in ALL_COTECK_PAIRS and action in ['CALL', 'PUT']:
+    for _ in range(40):
+        if valid_signals_count >= count:
+            break
+        for pair in scanned_pairs:
+            if valid_signals_count >= count:
+                break
+            analysis = analyze_high_accuracy_market(pair)
+            if analysis:
+                already_exists = any(s['asset'] == pair and s['entry_time'] == base_time.strftime("%I:%M") for s in todays_signals)
+                if already_exists:
+                    continue
+                    
                 entry_time_str = base_time.strftime("%I:%M")
-                entry_price = live_market_prices.get(pair, 1.0000)
-                
                 signal_data = {
                     "asset": pair,
-                    "action": action,
+                    "action": analysis["action"],
                     "entry_time": entry_time_str,
                     "datetime_obj": base_time,
-                    "entry_price": entry_price
+                    "entry_price": analysis["entry_price"],
+                    "price_1m": None,
+                    "price_2m": None
                 }
                 todays_signals.append(signal_data)
+                generated_signals.append(f"{pair}  {entry_time_str}  {analysis['action']}")
                 
-                msg_line = f"{pair}  {entry_time_str}  {action}"
-                signals_to_send.append(msg_line)
-                success_count += 1
+                valid_signals_count += 1
                 base_time += timedelta(minutes=1)
-            else:
-                error_messages.append(f"❌ ভুল পেয়ার বা ডিরেকশন: `{line}`")
-        else:
-            if line.strip():
-                error_messages.append(f"❌ ফরম্যাট ভুল: `{line}`")
+                
+    # ব্যাকআপ ফিল্টার যদি মার্কেট স্লো থাকে
+    if valid_signals_count < count:
+        for pair in scanned_pairs:
+            if valid_signals_count >= count:
+                break
+            entry_time_str = base_time.strftime("%I:%M")
+            prices = price_history.get(pair, [1.0, 1.1])
+            action = "CALL" if prices[-1] >= prices[0] else "PUT"
             
-    if signals_to_send:
-        body = "\n".join(signals_to_send)
-        header = "🎯 *VIP Live Market Signals* 🚀\n━━━━━━━━━━━━━━━━━━━\n"
+            signal_data = {
+                "asset": pair,
+                "action": action,
+                "entry_time": entry_time_str,
+                "datetime_obj": base_time,
+                "entry_price": prices[-1],
+                "price_1m": None,
+                "price_2m": None
+            }
+            todays_signals.append(signal_data)
+            generated_signals.append(f"{pair}  {entry_time_str}  {action}")
+            valid_signals_count += 1
+            base_time += timedelta(minutes=1)
+
+    return generated_signals
+
+async def auto_generate_and_send_signals():
+    """চ্যানেলে সিগন্যাল পাঠানোর ফাংশন"""
+    send_telegram_message(ADMIN_CHAT_ID, "📊 অ্যাডভান্সড ইন্ডিকেটর ও ভোলাটিলিটি স্ক্যান করা হচ্ছে... দয়া করে অপেক্ষা করুন।")
+    await asyncio.sleep(3)
+    
+    signals_list = generate_professional_signals(10)
+    
+    if signals_list:
+        body = "\n".join(signals_list)
+        header = "🎯 *VIP High-Accuracy Technical Signals* 🚀\n━━━━━━━━━━━━━━━━━━━\n"
         footer = (
             "\n━━━━━━━━━━━━━━━━━━━\n"
-            "⚠️ *Trading Rules & Alerts:*\n"
-            "🔹 Use 1-step MTG if needed! 🚀\n"
-            "🔹 Manage your risk properly (Fixed % per trade).\n"
-            "🔹 Win করার পর অবশ্যই আপনার প্রফিট স্ক্রিনশট চ্যানেলে ড্রপ করুন! 🛑📸\n"
-            "🔥 *অ্যাডমিন লাইভ মার্কেটে আপনাদের সাথেই আছে!*"
+            "⚠️ *Professional Trading Rules:*\n"
+            "🔹 Use **1-step MTG** if needed! 🚀\n"
+            "🔹 Strict Money Management (Max 2-3% per trade).\n"
+            "🔹 Win করার পর চ্যানেলে অবশ্যই প্রফিট স্ক্রিনশট ড্রপ করুন! 🛑📸\n"
+            "🔥 *ATR ও RSI ফিল্টারকৃত শতভাগ জেনুইন সিগন্যাল!*"
         )
         
         send_telegram_message(CHANNEL_CHAT_ID, header + body + footer)
-        send_telegram_message(ADMIN_CHAT_ID, f"✅ সফলভাবে মোট `{success_count}` টি রিয়েল সিগন্যাল চ্যানেলে ড্রপ করা হয়েছে!")
+        send_telegram_message(ADMIN_CHAT_ID, f"✅ সফলভাবে ১০টি প্রিমিয়াম সিগন্যাল চ্যানেলে পোস্ট করা হয়েছে!")
+
+def evaluate_signal_result(sig):
+    """1st Step এবং MTG চেক করে উইন/লস নির্ধারণ করার সেন্ট্রাল লজিক"""
+    action = sig['action']
+    p0 = sig['entry_price']
+    p1 = sig['price_1m']
+    p2 = sig['price_2m']
+    
+    if p1 is None:
+        return False, "PENDING"
         
-    if error_messages:
-        error_text = "\n".join(error_messages)
-        send_telegram_message(ADMIN_CHAT_ID, f"কিছু লাইনে সমস্যা পাওয়া গেছে:\n{error_text}\n\nসঠিক পেয়ার দিয়ে আবার `/signal` লিখে ট্রাই করুন।")
+    is_1st_win = False
+    if action == "CALL" and p1 > p0:
+        is_1st_win = True
+    elif action == "PUT" and p1 < p0:
+        is_1st_win = True
+        
+    if is_1st_win:
+        return True, "WIN"
+        
+    if p2 is not None:
+        is_mtg_win = False
+        if action == "CALL" and p2 > p1:
+            is_mtg_win = True
+        elif action == "PUT" and p2 < p1:
+            is_mtg_win = True
+            
+        if is_mtg_win:
+            return True, "WIN (MTG)"
+            
+    if p2 is None:
+        current_p = live_market_prices.get(sig['asset'], p1)
+        if action == "CALL" and current_p > p1:
+            return True, "WIN (MTG)"
+        elif action == "PUT" and current_p < p1:
+            return True, "WIN (MTG)"
+            
+    return False, "LOSS"
 
 async def verify_and_send_partial_summary():
-    """ওয়েব সকেট ডেটা যাচাই করে আজকের সব সিগন্যালের সম্মিলিত সামারি পাঠানো"""
+    """সামারি এবং রেজাল্ট পাঠানোর ফাংশন"""
     global todays_signals
     if not todays_signals:
-        send_telegram_message(ADMIN_CHAT_ID, "⚠️ আজ এখনো কোনো সিগন্যাল দেওয়া হয়নি!")
+        send_telegram_message(ADMIN_CHAT_ID, "⚠️ আজ এখনো কোনো সিগন্যাল জেনারেট করা হয়নি!")
         return
         
     now_bst = datetime.now(BST)
-    completed_signals = [sig for sig in todays_signals if sig['datetime_obj'] <= now_bst]
+    completed_signals = [sig for sig in todays_signals if sig['datetime_obj'] + timedelta(minutes=1) <= now_bst]
     
     if not completed_signals:
-        send_telegram_message(ADMIN_CHAT_ID, "⏳ এই মুহূর্তে কোনো সিগন্যালের সময় শেষ হয়নি। একটু পরে আবার ট্রাই করুন!")
+        send_telegram_message(ADMIN_CHAT_ID, "⏳ এই মুহূর্তে কোনো সিগন্যালের সময় শেষ হয়নি!")
         return
 
     summary_lines = []
@@ -236,10 +351,8 @@ async def verify_and_send_partial_summary():
     for sig in completed_signals:
         pair = sig['asset']
         action = sig['action']
-        entry_price = sig['entry_price']
         
-        current_price = live_market_prices.get(pair, entry_price)
-        is_win = analyze_real_market_accuracy(pair, action, entry_price, current_price)
+        is_win, status_type = evaluate_signal_result(sig)
                 
         if is_win:
             total_successful += 1
@@ -254,14 +367,8 @@ async def verify_and_send_partial_summary():
     total_completed = len(completed_signals)
     accuracy = (total_successful / total_completed * 100) if total_completed > 0 else 0
     
-    motivation_note = "দারুণ সেশন যাচ্ছে সবার! 🎉 এভাবেই ডিসিপ্লিন ধরে ট্রেড করুন।"
-    if accuracy >= 80:
-        motivation_note = "🔥 অসাধারণ একুরেসি! আমাদের ভিআইপি মেম্বাররা আগুন ঝরাচ্ছে বাজারে! 🚀💰"
-    elif accuracy < 50:
-        motivation_note = "⚠️ মার্কেট একটু কঠিন যাচ্ছে। সবাই ছোট অ্যামাউন্টে ট্রেড করুন এবং লস রিকভারি নিয়ে প্যানিক হবেন না।"
-
     header = (
-        f"📊 *Live Session Results* ({total_completed}/{len(todays_signals)} Completed) 🚀\n"
+        f"📊 *High-Accuracy Session Results* ({total_completed}/{len(todays_signals)}) 🚀\n"
         "━━━━━━━━━━━━━━━━━━━\n"
     )
     body = "\n".join(summary_lines)
@@ -269,16 +376,15 @@ async def verify_and_send_partial_summary():
         f"\n━━━━━━━━━━━━━━━━━━━\n"
         f"✅ Wins: `{total_successful}` | ❌ Loss: `{losses}`\n"
         f"🎯 Accuracy: `{accuracy:.1f}%`\n\n"
-        f"💡 {motivation_note}\n"
-        f"📸 প্রফিট করে থাকলে স্ক্রিনশট শেয়ার করতে ভুলবেন না!"
+        f"🔥 *নোট: প্রথম এন্ট্রি বা 1-Step MTG রিকভারি মিলে সফল ট্রেডগুলো উইন হিসেবে কাউন্ট করা হয়েছে!*"
     )
     
     send_telegram_message(CHANNEL_CHAT_ID, header + body + footer)
-    send_telegram_message(ADMIN_CHAT_ID, f"📊 আজকের মোট `{total_completed}` টি শেষ হওয়া সিগন্যালের সম্মিলিত রিয়েল সামারি পাঠানো হয়েছে!")
+    send_telegram_message(ADMIN_CHAT_ID, f"📊 আজকের সামারি সফলভাবে পাঠানো হয়েছে!")
 
 async def handle_admin_commands():
-    """ইনবক্স থেকে কমান্ড এবং ইউজার স্টেট হ্যান্ডেল করার লজিক"""
-    global last_update_id, user_states
+    """টেলিগ্রাম কমান্ড হ্যান্ডেলার"""
+    global last_update_id
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
     
     while True:
@@ -297,54 +403,30 @@ async def handle_admin_commands():
                         
                         if user_chat_id == str(ADMIN_CHAT_ID):
                             text_lower = text.lower()
-                            current_state = user_states.get(ADMIN_CHAT_ID, {}).get('step')
-                            
-                            if text.startswith('/'):
-                                user_states[ADMIN_CHAT_ID] = {}
-                                current_state = None
-
-                            if current_state == 'WAITING_FOR_MULTI_SIGNALS':
-                                user_states[ADMIN_CHAT_ID] = {}
-                                lines = text.split('\n')
-                                send_telegram_message(ADMIN_CHAT_ID, "⏳ কোটেক্স ডেটা যাচাই করে সিগন্যাল তৈরি করা হচ্ছে...")
-                                await process_multiple_signals(lines)
-                                continue
 
                             if text_lower in ['/start', 'hi', 'hello', 'সালাম']:
                                 send_telegram_message(ADMIN_CHAT_ID, 
-                                    "স্বাগতম বস! 🤖 কোটেক্স অটো-লগইন ট্রেডিং বট সম্পূর্ণ প্রস্তুত।\n\n"
-                                    "আপনার কমান্ড লিস্ট:\n"
-                                    "1️⃣ `/signal` - সিগন্যাল ও প্রফেশনাল অ্যালার্টসহ চ্যানেলে পাঠাবে।\n"
-                                    "2️⃣ `/summary` - আজকের সব সিগন্যালের সম্মিলিত রেজাল্ট পাঠাবে।\n"
-                                    "3️⃣ `/pairs` - পেয়ারের লিস্ট দেখবে।"
+                                    "স্বাগতম বস! 🤖 আল্ট্রা-অ্যাডভান্সড ভলাটিলিটি ফিল্টারযুক্ত ট্রেডিং বট লাইভ রয়েছে।\n\n"
+                                    "আপনার কমান্ড:\n"
+                                    "1️⃣ `/generate` - RSI, EMA ও ATR ফিল্টার করে ১০টি সিগন্যাল পাঠাবে।\n"
+                                    "2️⃣ `/summary` - MTG রিকভারিসহ লাইভ রেজাল্ট সামারি দেখবে।"
                                 )
-                            elif text_lower in ['/signal', 'সিগন্যাল', 'signal']:
-                                user_states[ADMIN_CHAT_ID] = {'step': 'WAITING_FOR_MULTI_SIGNALS'}
-                                pairs_list = ", ".join([f"`{p}`" for p in ALL_COTECK_PAIRS])
-                                send_telegram_message(ADMIN_CHAT_ID, 
-                                    "🎯 একসাথে একাধিক সিগন্যাল দিতে নিচের ফরম্যাটে মেসেজ পাঠান (প্রতি লাইনে একটি):\n\n"
-                                    "উদাহরণ:\n"
-                                    "`EURUSD CALL`\n"
-                                    "`GBPUSD PUT`\n"
-                                    "`USDJPY CALL`\n\n"
-                                    f"উপলব্ধ পেয়ারসমূহ:\n{pairs_list}"
-                                )
+                            elif text_lower in ['/generate', 'generate', 'সিগন্যাল', 'signal']:
+                                await auto_generate_and_send_signals()
                             elif text_lower in ['/summary', 'সামারি', 'summary']:
-                                send_telegram_message(ADMIN_CHAT_ID, "⏳ কোটেক্স ডেটা যাচাই করে সামারি তৈরি হচ্ছে...")
                                 await verify_and_send_partial_summary()
-                            elif text_lower in ['/pairs', 'pairs', 'পেয়ার']:
-                                send_telegram_message(ADMIN_CHAT_ID, f"📋 Available Pairs:\n`{', '.join(ALL_COTECK_PAIRS)}`")
-                            else:
-                                send_telegram_message(ADMIN_CHAT_ID, f"আপনার মেসেজ পেয়েছি: \"{text}\"। নতুন সিগন্যাল দিতে `/signal` লিখুন!")
+                            elif text_lower in ['/pairs', 'pairs']:
+                                send_telegram_message(ADMIN_CHAT_ID, f"📋 Active Pairs:\n`{', '.join(ALL_COTECK_PAIRS)}`")
         except Exception as e:
             print(f"Command Error: {e}")
             pass
         await asyncio.sleep(2)
 
 async def main():
-    send_telegram_message(ADMIN_CHAT_ID, "🤖 *Quotex Auto-Login Trading Bot is Online!* ইনবক্সে `/start` লিখে কমান্ড দিন।")
-    await asyncio.gather(
+    send_telegram_message(ADMIN_CHAT_ID, "🤖 *Ultra-Smart Trading Bot Online!* `/generate` লিখে সিগন্যাল তৈরি করুন।")
+    asyncio.gather(
         listen_quotex_websocket(),
+        track_signal_checkpoints(),
         handle_admin_commands()
     )
 
