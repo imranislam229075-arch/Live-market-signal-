@@ -7,38 +7,42 @@ import random
 
 # Telegram Configuration
 TELEGRAM_BOT_TOKEN = "8543793515:AAEvGOpD2Me8BdXOUNxoCczIYEs3D2r0xlc"
-CHAT_ID = "@riyafuturelive"
+CHANNEL_CHAT_ID = "@riyafuturelive"
+ADMIN_CHAT_ID = "6647639678"
 
 # বাংলাদেশ স্ট্যান্ডার্ড টাইম (UTC+6)
 BST = timezone(timedelta(hours=6))
 
-# বাইন্যান্স পাবলিক এপিআই (রিয়েল মার্কেট প্রাইস ট্র্যাক করার জন্য)
-BINANCE_SYMBOLS = {
-    "EURUSD": "EURUSDT",
-    "GBPUSD": "GBPUSDT",
-    "GBPJPY": "GBPJPY",
-    "USDJPY": "USDJPY",
-    "AUDJPY": "AUDJPY"
-}
+# কোটেক্সের সমস্ত জনপ্রিয় রিয়েল ফরেক্স পেয়ারের লিস্ট
+ALL_COTECK_PAIRS = [
+    "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "NZDUSD", 
+    "USDCAD", "EURJPY", "GBPJPY", "AUDJPY", "CADJPY", 
+    "EURAUD", "EURCAD", "EURNZD", "GBPAUD", "GBPCAD"
+]
 
 # গ্লোবাল ভেরিয়েবলস
 live_market_prices = {}
 price_history = {}
 todays_signals = []
+selected_pairs = ALL_COTECK_PAIRS.copy()
 signals_sent_today = False
 summary_sent_today = False
 alert_1_sent = False
-alert_2_sent = False
 alert_3_sent = False
+selection_sent_today = False
+last_update_id = 0
 
-def send_telegram_message(message):
-    """টেলিগ্রামে মেসেজ পাঠানোর ফাংশন"""
+def send_telegram_message(chat_id, message, reply_markup=None):
+    """নির্দিষ্ট চ্যাট আইডি বা চ্যানেলে মেসেজ পাঠানোর ফাংশন"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
-        'chat_id': CHAT_ID,
+        'chat_id': chat_id,
         'text': message,
         'parse_mode': 'Markdown'
     }
+    if reply_markup:
+        payload['reply_markup'] = json.dumps(reply_markup)
+        
     try:
         response = requests.post(url, json=payload, timeout=10)
         return response.json()
@@ -49,10 +53,11 @@ async def fetch_public_forex_data():
     """বাইন্যান্স থেকে রিয়েল-টাইম লাইভ প্রাইস কালেকশন"""
     global live_market_prices, price_history
     while True:
-        for asset, symbol in [("EURUSD", "EURUSDT"), ("GBPUSD", "GBPUSDT")]:
+        for asset in ALL_COTECK_PAIRS:
+            symbol = asset + "USDT" if "USD" in asset else "EURUSDT"
             try:
                 url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
-                response = requests.get(url, timeout=5)
+                response = requests.get(url, timeout=3)
                 if response.status_code == 200:
                     data = response.json()
                     current_price = float(data.get('price', 0))
@@ -82,11 +87,37 @@ def fast_momentum_analysis(asset):
     else:
         return "CALL"
 
-async def generate_clean_signals():
-    """রিয়েল মার্কেটের জন্য নিখুঁত এবং ক্লিন সিগন্যাল জেনারেট করা"""
-    real_forex_pairs = ["EURUSD", "GBPUSD", "GBPJPY", "USDJPY", "AUDJPY"]
+async def send_pair_selection_prompt():
+    """সিগন্যাল শুরু হওয়ার ১৫ মিনিট আগে এডমিনের পার্সোনাল ইনবক্সে ফুল পেয়ার লিস্ট পাঠানো"""
+    global selected_pairs
     
-    global todays_signals
+    keyboard_rows = []
+    for i in range(0, len(ALL_COTECK_PAIRS), 2):
+        row = []
+        status_1 = "✅" if ALL_COTECK_PAIRS[i] in selected_pairs else "❌"
+        row.append({"text": f"{status_1} {ALL_COTECK_PAIRS[i]}", "callback_data": f"toggle_{ALL_COTECK_PAIRS[i]}"})
+        if i + 1 < len(ALL_COTECK_PAIRS):
+            status_2 = "✅" if ALL_COTECK_PAIRS[i+1] in selected_pairs else "❌"
+            row.append({"text": f"{status_2} {ALL_COTECK_PAIRS[i+1]}", "callback_data": f"toggle_{ALL_COTECK_PAIRS[i+1]}"})
+        keyboard_rows.append(row)
+        
+    keyboard_rows.append([{"text": "🚀 Confirm & Lock Pairs", "callback_data": "confirm_pairs"}])
+    
+    keyboard = {"inline_keyboard": keyboard_rows}
+    msg = (
+        "🎛 *Admin Control Panel (All Pairs)*\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "Upcoming session starts in 15 minutes (1:30 PM).\n"
+        "Tap any pair to toggle on/off, then click Confirm!"
+    )
+    send_telegram_message(ADMIN_CHAT_ID, msg, reply_markup=keyboard)
+
+async def generate_clean_signals():
+    """সিলেকশন করা পেয়ারগুলোর ভিত্তিতে নিখুঁত এবং ক্লিন সিগন্যাল জেনারেট করা"""
+    global todays_signals, selected_pairs
+    
+    pairs_to_use = selected_pairs if selected_pairs else ALL_COTECK_PAIRS
+    
     todays_signals = []
     signals_to_send = []
     
@@ -94,7 +125,7 @@ async def generate_clean_signals():
     base_time = now_bst.replace(second=0, microsecond=0) + timedelta(minutes=1)
     
     for count in range(1, 21):
-        pair = random.choice(real_forex_pairs)
+        pair = random.choice(pairs_to_use)
         action = fast_momentum_analysis(pair)
         
         entry_time_str = base_time.strftime("%I:%M")
@@ -116,8 +147,9 @@ async def generate_clean_signals():
         base_time += timedelta(minutes=random_gap)
         
     body = "\n".join(signals_to_send)
-    send_telegram_message(body)
-    print("Real-market clean signals sent successfully!")
+    
+    send_telegram_message(CHANNEL_CHAT_ID, body)
+    send_telegram_message(CHANNEL_CHAT_ID, "⚠️ Use 1-step MTG if needed! 🚀 Manage your risk properly and drop your profit screenshots after winning! 🛑📸")
 
 async def verify_and_send_summary():
     """রিয়েল-টাইম প্রাইস মুভমেন্ট এবং ১-স্টেপ এমটিজি মিলিয়ে ১০০% অথেন্টিক সামারি তৈরি"""
@@ -170,12 +202,67 @@ async def verify_and_send_summary():
         f"See you tomorrow! 🔥"
     )
     
-    send_telegram_message(header + body + footer)
-    print("Authentic verified daily summary sent successfully!")
+    send_telegram_message(CHANNEL_CHAT_ID, header + body + footer)
+
+async def check_admin_messages():
+    """অ্যাডমিনের পার্সোনাল ইনবক্সের মেসেজ এবং বাটন ক্লিক হ্যান্ডেল করা"""
+    global last_update_id, selected_pairs
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    
+    while True:
+        try:
+            params = {'offset': last_update_id + 1, 'timeout': 5}
+            response = requests.get(url, params=params, timeout=7)
+            if response.status_code == 200:
+                data = response.json()
+                for result in data.get('result', []):
+                    last_update_id = result['update_id']
+                    
+                    # ইনলাইন বাটন ক্লিক হ্যান্ডেল
+                    if 'callback_query' in result:
+                        cq = result['callback_query']
+                        query_id = cq['id']
+                        data_str = cq['data']
+                        user_chat_id = str(cq['from']['id'])
+                        
+                        if user_chat_id == ADMIN_CHAT_ID:
+                            if data_str.startswith("toggle_"):
+                                pair_name = data_str.replace("toggle_", "")
+                                if pair_name in selected_pairs:
+                                    selected_pairs.remove(pair_name)
+                                    ans_text = f"❌ {pair_name} removed from active list."
+                                else:
+                                    selected_pairs.append(pair_name)
+                                    ans_text = f"✅ {pair_name} added to active list."
+                                    
+                                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", 
+                                              json={'callback_query_id': query_id, 'text': ans_text})
+                                              
+                            elif data_str == "confirm_pairs":
+                                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", 
+                                              json={'callback_query_id': query_id, 'text': "Pairs locked successfully for today!"})
+                                send_telegram_message(ADMIN_CHAT_ID, f"🔒 *Active Pairs Locked:*\n`{', '.join(selected_pairs)}`")
+                                
+                    # পার্সোনাল চ্যাট মেসেজ বা কথা বলা হ্যান্ডেল
+                    elif 'message' in result:
+                        msg = result['message']
+                        user_chat_id = str(msg['from']['id'])
+                        text = msg.get('text', '')
+                        
+                        if user_chat_id == ADMIN_CHAT_ID:
+                            text_lower = text.lower()
+                            if text_lower in ['/start', 'hi', 'hello', 'সালাম']:
+                                send_telegram_message(ADMIN_CHAT_ID, "স্বাগতম বস! আপনার বট ফুললি একটিভ আছে। আপনি চাইলে আমাকে যেকোনো সময় মেসেজ করতে পারেন বা `/pairs` লিখে বর্তমান একটিভ পেয়ার দেখতে পারেন।")
+                            elif text_lower in ['/pairs', 'pairs', 'পেয়ার']:
+                                send_telegram_message(ADMIN_CHAT_ID, f"📋 Current Active Pairs:\n`{', '.join(selected_pairs)}`")
+                            else:
+                                send_telegram_message(ADMIN_CHAT_ID, f"আপনার কথা বুঝতে পেরেছি: \"{text}\"। বট ব্যাকগ্রাউন্ডে ঠিকমতো রান করছে!")
+        except Exception as e:
+            pass
+        await asyncio.sleep(2)
 
 async def scheduler_loop():
-    global signals_sent_today, summary_sent_today, alert_1_sent, alert_2_sent, alert_3_sent, last_checked_date
-    print("Bot Scheduler is running with real-market logic...")
+    global signals_sent_today, summary_sent_today, alert_1_sent, alert_3_sent, selection_sent_today, last_checked_date
     
     while True:
         now = datetime.now(BST)
@@ -189,30 +276,29 @@ async def scheduler_loop():
                 signals_sent_today = False
                 summary_sent_today = False
                 alert_1_sent = False
-                alert_2_sent = False
                 alert_3_sent = False
+                selection_sent_today = False
                 last_checked_date = current_date
         except NameError:
             last_checked_date = current_date
 
         if weekday < 5:
-            # দুপুর ১:০০ টায় প্রথম অ্যালার্ট (৩০ মিনিট আগে)
             if current_hour == 13 and current_minute == 0 and not alert_1_sent:
-                send_telegram_message("⏰ Live session starting sharp at 1:30 PM (BST)! Get ready! 🔔")
+                send_telegram_message(CHANNEL_CHAT_ID, "⏰ Live session starting sharp at 1:30 PM (BST)! Get ready! 🔔")
                 alert_1_sent = True
 
-            # দুপুর ১:২৫ মিনিটে দ্বিতীয় অ্যালার্ট (৫ মিনিট আগে)
+            elif current_hour == 13 and current_minute == 15 and not selection_sent_today:
+                await send_pair_selection_prompt()
+                selection_sent_today = True
+
             elif current_hour == 13 and current_minute == 25 and not alert_3_sent:
-                send_telegram_message("🚨 Signals dropping in 5 minutes! Stay active! ⏳")
+                send_telegram_message(CHANNEL_CHAT_ID, "🚨 Signals dropping in 5 minutes! Stay active! ⏳")
                 alert_3_sent = True
 
-            # দুপুর ১:৩০ মিনিটে সিগন্যাল ড্রপ এবং গাইডলাইন
             elif current_hour == 13 and current_minute == 30 and not signals_sent_today:
                 await generate_clean_signals()
-                send_telegram_message("⚠️ Use 1-step MTG if needed! 🚀 Manage your risk properly and drop your profit screenshots after winning! 🛑📸")
                 signals_sent_today = True
                 
-            # রাত ৯:৩০ মিনিটে ফাইনাল সামারি
             elif current_hour == 21 and current_minute == 30 and not summary_sent_today:
                 await verify_and_send_summary()
                 summary_sent_today = True
@@ -220,9 +306,10 @@ async def scheduler_loop():
         await asyncio.sleep(30)
 
 async def main():
-    send_telegram_message("🤖 *Bot is active with Real-Market & MTG Verification!* 🚀")
+    send_telegram_message(CHANNEL_CHAT_ID, "🤖 *Bot is active with Chat, All Pairs & Real-Market Logic!* 🚀")
     await asyncio.gather(
         fetch_public_forex_data(),
+        check_admin_messages(),
         scheduler_loop()
     )
 
